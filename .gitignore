@@ -1,0 +1,11 @@
+node_modules/
+.env
+*.log
+.DS_Store
+coverage/
+.nyc_output/
+*-report.json
+*-report.html
+zap-reports/
+aws_resources_created.txt
+*.backup

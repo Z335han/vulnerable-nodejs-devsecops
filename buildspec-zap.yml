@@ -1,0 +1,82 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+    commands:
+      - echo "Setting up OWASP ZAP environment on `date`"
+      - apt-get update
+      - apt-get install -y docker.io
+      - service docker start
+      - docker pull owasp/zap2docker-stable
+      
+  pre_build:
+    commands:
+      - echo "Starting the application for DAST scanning..."
+      - npm install
+      - nohup node app.js &
+      - APP_PID=$!
+      - sleep 10
+      - echo "Application started with PID $APP_PID"
+      - curl http://localhost:4567 || echo "App may need more time to start"
+      
+  build:
+    commands:
+      - echo "Starting OWASP ZAP DAST scan on `date`"
+      
+      # Create ZAP working directory
+      - mkdir -p zap-reports
+      
+      # Run ZAP Baseline Scan
+      - echo "Running ZAP Baseline scan..."
+      - |
+        docker run --rm \
+          --network="host" \
+          -v $(pwd)/zap-reports:/zap/wrk/:rw \
+          -t owasp/zap2docker-stable zap-baseline.py \
+          -t http://localhost:4567 \
+          -r zap-baseline-report.html \
+          -J zap-baseline-report.json \
+          -x zap-baseline-report.xml \
+          || true
+      
+  post_build:
+    commands:
+      - echo "DAST scan completed on `date`"
+      - echo "Killing application..."
+      - pkill -f "node app.js" || true
+      
+      # Generate summary
+      - |
+        cat > dast-summary.json << 'EODAST'
+        {
+          "scanDate": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "scanType": "OWASP ZAP DAST",
+          "reports": {
+            "baseline": "zap-baseline-report.json"
+          },
+          "targetUrl": "http://localhost:4567"
+        }
+        EODAST
+      
+      # Upload to S3
+      - echo "Uploading DAST reports to S3..."
+      - |
+        if [ -n "$REPORTS_BUCKET" ]; then
+          aws s3 cp zap-reports/ s3://$REPORTS_BUCKET/dast/ --recursive || true
+          aws s3 cp dast-summary.json s3://$REPORTS_BUCKET/dast/summary-$(date +%Y%m%d-%H%M%S).json || true
+        fi
+      
+artifacts:
+  files:
+    - 'zap-reports/*'
+    - '*-report.*'
+    - 'dast-summary.json'
+  name: dast-scan-artifacts
+  
+reports:
+  DASTReports:
+    files:
+      - 'zap-reports/*.json'
+      - 'dast-summary.json'

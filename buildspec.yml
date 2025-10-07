@@ -1,0 +1,99 @@
+version: 0.2
+
+environment_variables:
+  plaintext:
+    NODE_ENV: "test"
+    
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+    commands:
+      - echo "Installing dependencies on `date`"
+      - npm install
+      - echo "Installing Snyk CLI..."
+      - npm install -g snyk
+      - echo "Installing other security tools..."
+      - npm install -g retire
+      - npm install -g npm-audit-html
+      
+  pre_build:
+    commands:
+      - echo "Authenticating with Snyk..."
+      - snyk auth $SNYK_TOKEN || echo "Snyk auth failed, continuing..."
+      - echo "Pre-build phase completed on `date`"
+      
+  build:
+    commands:
+      - echo "Starting security scans on `date`"
+      
+      # NPM Audit
+      - echo "Running NPM Audit..."
+      - npm audit --json > npm-audit-report.json || true
+      - npm audit --audit-level=moderate || true
+      
+      # Snyk SCA (Software Composition Analysis)
+      - echo "Running Snyk SCA scan..."
+      - snyk test --json > snyk-sca-report.json || true
+      - snyk test --severity-threshold=high || true
+      
+      # Snyk SAST (Static Application Security Testing)
+      - echo "Running Snyk Code SAST scan..."
+      - snyk code test --json > snyk-sast-report.json || true
+      - snyk code test --severity-threshold=high || true
+      
+      # Retire.js scan for vulnerable JavaScript libraries
+      - echo "Running Retire.js scan..."
+      - retire --outputformat json --outputpath retire-report.json || true
+      
+      # License check
+      - echo "Running license check..."
+      - npx license-checker --json > license-report.json || true
+      
+      # Build the application
+      - echo "Building application..."
+      - npm run build
+      
+      # Run tests (if any)
+      - echo "Running tests..."
+      - npm test
+      
+  post_build:
+    commands:
+      - echo "Build completed on `date`"
+      - echo "Generating summary report..."
+      - |
+        cat > security-summary.json << 'EOSUMMARY'
+        {
+          "scanDate": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "scans": {
+            "npm_audit": "npm-audit-report.json",
+            "snyk_sca": "snyk-sca-report.json",
+            "snyk_sast": "snyk-sast-report.json",
+            "retire_js": "retire-report.json",
+            "licenses": "license-report.json"
+          },
+          "status": "completed"
+        }
+        EOSUMMARY
+      - echo "Uploading reports to S3..."
+      - |
+        if [ -n "$REPORTS_BUCKET" ]; then
+          aws s3 cp npm-audit-report.json s3://$REPORTS_BUCKET/scans/npm-audit-$(date +%Y%m%d-%H%M%S).json || true
+          aws s3 cp snyk-sca-report.json s3://$REPORTS_BUCKET/scans/snyk-sca-$(date +%Y%m%d-%H%M%S).json || true
+          aws s3 cp snyk-sast-report.json s3://$REPORTS_BUCKET/scans/snyk-sast-$(date +%Y%m%d-%H%M%S).json || true
+          aws s3 cp retire-report.json s3://$REPORTS_BUCKET/scans/retire-$(date +%Y%m%d-%H%M%S).json || true
+          aws s3 cp license-report.json s3://$REPORTS_BUCKET/scans/license-$(date +%Y%m%d-%H%M%S).json || true
+          aws s3 cp security-summary.json s3://$REPORTS_BUCKET/scans/summary-$(date +%Y%m%d-%H%M%S).json || true
+        fi
+      
+artifacts:
+  files:
+    - '**/*'
+  name: security-scan-artifacts
+  
+reports:
+  SecurityReports:
+    files:
+      - '*-report.json'
+      - 'security-summary.json'
