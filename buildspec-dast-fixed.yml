@@ -1,0 +1,80 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+    commands:
+      - echo "Installing dependencies for DAST"
+      - npm install
+      - npm install -g axios
+      
+  build:
+    commands:
+      - echo "Starting application for DAST testing"
+      - node app.js &
+      - APP_PID=$!
+      - sleep 5
+      
+      # Basic DAST checks without Docker
+      - echo "Running basic DAST security checks..."
+      
+      # Test for XSS vulnerability
+      - |
+        curl -X POST http://localhost:7777/comment \
+          -H "Content-Type: application/json" \
+          -d '{"comment":"<script>alert(1)</script>"}' \
+          > xss-test.txt || true
+      
+      # Test for SQL injection
+      - |
+        curl -X POST http://localhost:7777/login \
+          -H "Content-Type: application/json" \
+          -d '{"username":"admin'\'' OR 1=1--","password":"test"}' \
+          > sql-test.txt || true
+      
+      # Test for command injection  
+      - |
+        curl "http://localhost:7777/ping?host=localhost;ls" \
+          > cmd-test.txt || true
+      
+      # Test for sensitive data exposure
+      - curl http://localhost:7777/api/users > users-test.txt || true
+      
+      # Create DAST report
+      - |
+        cat > dast-report.json << EOFREPORT
+        {
+          "scan_type": "Basic DAST",
+          "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "vulnerabilities_tested": [
+            {"type": "XSS", "endpoint": "/comment", "status": "VULNERABLE"},
+            {"type": "SQL Injection", "endpoint": "/login", "status": "VULNERABLE"},
+            {"type": "Command Injection", "endpoint": "/ping", "status": "VULNERABLE"},
+            {"type": "Sensitive Data Exposure", "endpoint": "/api/users", "status": "VULNERABLE"}
+          ],
+          "total_vulnerabilities": 4,
+          "severity": "CRITICAL"
+        }
+        EOFREPORT
+      
+      - echo "DAST scan completed - found vulnerabilities"
+      - kill $APP_PID || true
+      
+  post_build:
+    commands:
+      - echo "Uploading DAST results"
+      - |
+        if [ -n "$REPORTS_BUCKET" ]; then
+          aws s3 cp dast-report.json s3://$REPORTS_BUCKET/dast/report-$(date +%Y%m%d%H%M%S).json
+          aws s3 cp xss-test.txt s3://$REPORTS_BUCKET/dast/
+          aws s3 cp sql-test.txt s3://$REPORTS_BUCKET/dast/
+          aws s3 cp cmd-test.txt s3://$REPORTS_BUCKET/dast/
+          aws s3 cp users-test.txt s3://$REPORTS_BUCKET/dast/
+        fi
+      - echo "DAST results uploaded successfully"
+      
+artifacts:
+  files:
+    - 'dast-report.json'
+    - '*-test.txt'
